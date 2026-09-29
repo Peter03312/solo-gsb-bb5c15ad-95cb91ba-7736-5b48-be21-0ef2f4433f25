@@ -42,6 +42,7 @@ import {
   mergeUnavailable,
   subtractUnder,
 } from '../src/lib/absence';
+import { allocateRehearsalBudget, projectPartDeficits } from '../src/lib/budget';
 import type { Project } from '../src/types';
 import { uid } from '../src/lib/id';
 
@@ -1105,6 +1106,162 @@ check('absence clamp Infinity', clampAbsence(0, Infinity, 10), null);
       [8, 10],
     ],
   );
+}
+
+// 63. 排练分钟预算分配：多声部工程构造（每声部 n 人，门槛 1，给定每歌手换气段）
+function budgetProject(
+  parts: { name: string; color: string; breaths: [number, number][][] }[],
+  duration = 20,
+): Project {
+  return {
+    name: 'budget-test',
+    duration,
+    beatMap: normalizeBeatMap({ startBpm: 120 }),
+    parts: parts.map((p, i) => ({ id: `bp${i}`, name: p.name, color: p.color, minSingers: 1 })),
+    singers: parts.flatMap((p, pi) =>
+      p.breaths.map((bs, si) => ({
+        id: `bs${pi}-${si}`,
+        name: `${p.name}歌手${si + 1}`,
+        partId: `bp${pi}`,
+        breaths: bs.map(([start, end]) => ({ id: uid(), start, end })),
+        fatigue: { ...DISABLED_FATIGUE },
+      })),
+    ),
+  };
+}
+
+// 缺口 = 两歌手换气交集长度（门槛 1：两人同时换气才未达标）
+{
+  // 3 声部（A/B/C），各 2 人：
+  //   A：[0,6)∩[0,4)=4；
+  //   B：([0,3)∪[8,11))∩([1,4)∪[9,11)) = [1,3)=2 + [9,11)=2，合计 4；
+  //   C：两人均无换气，缺口 0。
+  const p = budgetProject([
+    { name: 'A', color: '#f87171', breaths: [[[0, 6]], [[0, 4]]] },
+    { name: 'B', color: '#60a5fa', breaths: [[[0, 3], [8, 11]], [[1, 4], [9, 11]]] },
+    { name: 'C', color: '#34d399', breaths: [[], []] },
+  ]);
+  check('budget deficits', projectPartDeficits(p).map((d) => d.deficitSeconds), [4, 4, 0]);
+
+  // 64. 基本比例：min 0 / max 20，预算 8 → A:4, B:4, C:0（恰整除）
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 8, minMinutes: [0, 0, 0], maxMinutes: [20, 20, 20] });
+    check('budget proportional', r.ok && r.parts.map((x) => x.minutes), [4, 4, 0]);
+    check('budget exact sum', r.ok && r.parts.reduce((a, x) => a + x.minutes, 0), 8);
+    check('budget none capped', r.ok && r.parts.map((x) => x.capped), [false, false, false]);
+  }
+
+  // 65. 先满足最少量：min [3,3,1]，余量按缺口 4:4:0（A、B 等比）
+  {
+    // 预算 12：余量 5 → A 2.5 / B 2.5，floor 2/2 尾差 1 相同 → 按顺序补 A → [6,5,1]
+    const r = allocateRehearsalBudget(p, { totalMinutes: 12, minMinutes: [3, 3, 1], maxMinutes: [20, 20, 20] });
+    check('budget min then ratio', r.ok && r.parts.map((x) => x.minutes), [6, 5, 1]);
+    check('budget min sum', r.ok && r.parts.reduce((a, x) => a + x.minutes, 0), 12);
+  }
+
+  // 66. 封顶退出后重分：B 上限 3；min 0，预算 9 → A、B 等比各 4.5，B 超 3 封顶，
+  //     余 6 在 A(4)、C(0) 间按 4:0 全给 A
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 9, minMinutes: [0, 0, 0], maxMinutes: [20, 3, 20] });
+    check('budget cap reallocate', r.ok && r.parts.map((x) => x.minutes), [6, 3, 0]);
+    check('budget cap flags', r.ok && r.parts.map((x) => x.capped), [false, true, false]);
+  }
+
+  // 67. 未封顶声部缺口全为零 → 等权：仅 C 有容量（A、B 上限 0），预算 5 全给 C
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 5, minMinutes: [0, 0, 0], maxMinutes: [0, 0, 10] });
+    check('budget zero deficit equal', r.ok && r.parts.map((x) => x.minutes), [0, 0, 5]);
+  }
+
+  // 68. 缺口全零且多声部有容量 → 等权 + 尾差按声部顺序：min [1,1,1]，预算 5，余 2 三等分 → 补 A、B
+  {
+    const p0 = budgetProject([
+      { name: 'A', color: '#f87171', breaths: [[], []] },
+      { name: 'B', color: '#60a5fa', breaths: [[], []] },
+      { name: 'C', color: '#34d399', breaths: [[], []] },
+    ]);
+    const r = allocateRehearsalBudget(p0, { totalMinutes: 5, minMinutes: [1, 1, 1], maxMinutes: [10, 10, 10] });
+    check('budget equal tie order', r.ok && r.parts.map((x) => x.minutes), [2, 2, 1]);
+  }
+
+  // 69. 尾差按小数余量降序：等权缺口时尾差相同按声部顺序（预算 9 → 4.5/4.5，补 A）
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 9, minMinutes: [0, 0, 0], maxMinutes: [20, 20, 20] });
+    check('budget tie remainder order', r.ok && r.parts.map((x) => x.minutes), [5, 4, 0]);
+  }
+  {
+    // 不等缺口 4:1，min [2,2]：余量按 4:1 分，校验尾差流向
+    const pq = budgetProject([
+      { name: 'A', color: '#f87171', breaths: [[[0, 6]], [[0, 4]]] },
+      { name: 'B', color: '#60a5fa', breaths: [[[0, 2]], [[0, 1]]] },
+    ]);
+    // 预算 14，余量 10 → A 8.0 / B 2.0 整除 → [10,4]
+    let r = allocateRehearsalBudget(pq, { totalMinutes: 14, minMinutes: [2, 2], maxMinutes: [20, 20] });
+    check('budget frac exact', r.ok && r.parts.map((x) => x.minutes), [10, 4]);
+    // 预算 13，余量 9 → A 7.2 / B 1.8，小数 B 更大 → 尾差补 B → [9,4]
+    r = allocateRehearsalBudget(pq, { totalMinutes: 13, minMinutes: [2, 2], maxMinutes: [20, 20] });
+    check('budget frac remainder to B', r.ok && r.parts.map((x) => x.minutes), [9, 4]);
+    // 预算 12，余量 8 → A 6.4 / B 1.6，小数 A 更大 → 尾差补 A → [8,4]
+    r = allocateRehearsalBudget(pq, { totalMinutes: 12, minMinutes: [2, 2], maxMinutes: [20, 20] });
+    check('budget frac remainder to A', r.ok && r.parts.map((x) => x.minutes), [8, 4]);
+  }
+
+  // 70. 分配依据是当前覆盖秒数且不写入工程
+  {
+    const before = allocateRehearsalBudget(p, { totalMinutes: 9, minMinutes: [0, 0, 0], maxMinutes: [20, 20, 20] });
+    const p2: Project = {
+      ...p,
+      parts: p.parts.filter((x) => x.id !== 'bp0'),
+      singers: p.singers.filter((s) => s.partId !== 'bp0'),
+    };
+    // 删除 A 声部（工程改动）后按当前声部重算
+    const after = allocateRehearsalBudget(p2, { totalMinutes: 9, minMinutes: [0, 0], maxMinutes: [20, 20] });
+    check('budget recompute after change', after.ok && after.parts.map((x) => x.name), ['B', 'C']);
+    check('budget original untouched', before.ok && before.parts.length, 3);
+  }
+
+  // 71. 非法输入：说明原因且无方案
+  check('budget non-integer total', allocateRehearsalBudget(p, { totalMinutes: 9.5, minMinutes: [0, 0, 0], maxMinutes: [20, 20, 20] }).ok, false);
+  check('budget negative total', allocateRehearsalBudget(p, { totalMinutes: -1, minMinutes: [0, 0, 0], maxMinutes: [20, 20, 20] }).ok, false);
+  check('budget NaN bound', allocateRehearsalBudget(p, { totalMinutes: 9, minMinutes: [0, NaN, 0], maxMinutes: [20, 20, 20] }).ok, false);
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 9, minMinutes: [0, 8, 0], maxMinutes: [20, 6, 20] });
+    check('budget min over max', r.ok === false && /最少量/.test(r.ok ? '' : r.reason), true);
+  }
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 3, minMinutes: [2, 2, 0], maxMinutes: [20, 20, 20] });
+    check('budget below sum min', r.ok === false && /低于/.test(r.ok ? '' : r.reason), true);
+  }
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 22, minMinutes: [0, 0, 0], maxMinutes: [5, 6, 10] });
+    check('budget above sum max', r.ok === false && /高于/.test(r.ok ? '' : r.reason), true);
+  }
+  // 界限数量与声部不一致
+  check(
+    'budget length mismatch',
+    allocateRehearsalBudget(p, { totalMinutes: 9, minMinutes: [0, 0], maxMinutes: [20, 20, 20] }).ok,
+    false,
+  );
+
+  // 72. 边界可行：预算恰等于最少量合计 / 最多量合计
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 5, minMinutes: [2, 2, 1], maxMinutes: [20, 20, 20] });
+    check('budget exactly mins', r.ok && r.parts.map((x) => x.minutes), [2, 2, 1]);
+    const r2 = allocateRehearsalBudget(p, { totalMinutes: 11, minMinutes: [0, 0, 0], maxMinutes: [5, 6, 0] });
+    check('budget exactly maxs', r2.ok && r2.parts.map((x) => [x.minutes, x.capped]), [
+      [5, true],
+      [6, true],
+      [0, false],
+    ]);
+  }
+
+  // 73. 多轮封顶 + 尾差：A 上限 3、B 上限 5；预算 11
+  //     第 1 轮 A 份额 4.89 超 3 → A 封顶 3；余 8 按 B(5):C(0)，B 份额 8 超 5 → B 封顶 5；余 3 给零缺口的 C
+  {
+    const r = allocateRehearsalBudget(p, { totalMinutes: 11, minMinutes: [0, 0, 0], maxMinutes: [3, 5, 20] });
+    check('budget multi-round caps', r.ok && r.parts.map((x) => x.minutes), [3, 5, 3]);
+    check('budget multi-round flags', r.ok && r.parts.map((x) => x.capped), [true, true, false]);
+  }
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

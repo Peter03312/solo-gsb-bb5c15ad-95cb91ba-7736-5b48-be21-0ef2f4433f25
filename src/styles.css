@@ -1251,3 +1251,59 @@ input[type='number'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- 排练分钟预算分配 ---------- */
+.budget-panel {
+  max-height: 42%;
+}
+
+.budget-total {
+  margin: 6px 0;
+}
+
+.budget-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  margin: 4px 0 6px;
+}
+
+.budget-table th,
+.budget-table td {
+  text-align: left;
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.15);
+  white-space: nowrap;
+}
+
+.budget-table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.budget-table td:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.budget-table input {
+  width: 56px;
+}
+
+.budget-out {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.budget-capped {
+  font-style: normal;
+  font-size: 11px;
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  border-radius: 8px;
+  padding: 0 6px;
+}
