@@ -26,6 +26,7 @@ import Timeline, { type Ghost } from './components/Timeline';
 import OptimizerPanel from './components/OptimizerPanel';
 import RelayPanel from './components/RelayPanel';
 import AbsencePanel from './components/AbsencePanel';
+import BudgetPanel from './components/BudgetPanel';
 
 export default function App() {
   const [project, setProject] = useState<Project>(() => loadProject() ?? createSampleProject());
@@ -508,6 +509,8 @@ export default function App() {
             onUpdateInterval={updateInterval}
             onAddInterval={addInterval}
           />
+
+          <BudgetPanel project={project} />
 
           <AbsencePanel
             project={project}

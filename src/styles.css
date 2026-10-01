@@ -1251,3 +1251,25 @@ input[type='number'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- 排练前分钟预算 ---------- */
+.budget-panel {
+  max-height: 38%;
+}
+
+.budget-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.budget-toggle:hover {
+  color: var(--accent);
+}
+
+.budget-table input {
+  width: 72px;
+}
+
+.budget-table td {
+  vertical-align: middle;
+}

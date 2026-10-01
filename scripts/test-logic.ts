@@ -42,6 +42,7 @@ import {
   mergeUnavailable,
   subtractUnder,
 } from '../src/lib/absence';
+import { allocateBudget, planRehearsalBudget } from '../src/lib/budget';
 import type { Project } from '../src/types';
 import { uid } from '../src/lib/id';
 
@@ -1105,6 +1106,190 @@ check('absence clamp Infinity', clampAbsence(0, Infinity, 10), null);
       [8, 10],
     ],
   );
+}
+
+// ---------- 排练前分钟预算：保底、按缺口秒数比例、封顶退出重分、等权、尾差 ----------
+
+const e = (key: string, weight: number, min: number, max: number = Infinity) => ({ key, weight, min, max });
+const allocMap = (r: ReturnType<typeof allocateBudget>) =>
+  r.ok ? Object.fromEntries(r.allocations.map((a) => [a.key, a.minutes])) : null;
+const cappedKeys = (r: ReturnType<typeof allocateBudget>) =>
+  r.ok ? r.allocations.filter((a) => a.capped).map((a) => a.key) : [];
+
+// 63. 基本比例分配：保底后余量按权重比 1:2:3 分，恰好整除
+{
+  const r = allocateBudget(30, [e('A', 10, 0), e('B', 20, 0), e('C', 30, 0)]);
+  check('budget proportional exact', allocMap(r), { A: 5, B: 10, C: 15 });
+  check('budget sums to total', r.ok ? r.allocations.reduce((a, x) => a + x.minutes, 0) : -1, 30);
+}
+
+// 64. 先满足最少量：10 分钟保底，余量 20 按 1:2:1
+{
+  const r = allocateBudget(30, [e('A', 1, 2), e('B', 2, 3), e('C', 1, 5)]);
+  check('budget mins first', allocMap(r), { A: 7, B: 13, C: 10 });
+  check('budget mins kept', r.ok ? r.allocations.every((a) => a.minutes >= a.min) : false, true);
+}
+
+// 65. 达到上限的声部退出，余量在其余声部首重新分配
+{
+  // 权重 10:10:10、上限 A=8、B=8：保底 6，余量 18 三等各 6 → A/B 触顶各 8（吃掉 12），
+  // 退出后剩余 6 全给 C → C=8
+  const r = allocateBudget(24, [e('A', 10, 2, 8), e('B', 10, 2, 8), e('C', 10, 2)]);
+  check('budget capped exit realloc', allocMap(r), { A: 8, B: 8, C: 8 });
+  check('budget capped keys', cappedKeys(r), ['A', 'B']);
+}
+
+// 66. 尾差最大余数法：余量 10 按 1:1:1 → 3.33 / 3.33 / 3.33，余 1 分钟
+//     按小数余量降序（全相同）、再按声部顺序补给 A
+{
+  const r = allocateBudget(10, [e('A', 1, 0), e('B', 1, 0), e('C', 1, 0)]);
+  check('budget largest remainder order', allocMap(r), { A: 4, B: 3, C: 3 });
+}
+
+// 67. 尾差按小数余量降序：10 按权重 1:2:3 → 1.67/3.33/5 → 余 1 给小数最大的 A
+{
+  const r = allocateBudget(10, [e('A', 1, 0), e('B', 2, 0), e('C', 3, 0)]);
+  check('budget fraction desc', allocMap(r), { A: 2, B: 3, C: 5 });
+}
+
+// 68. 未封顶声部缺口全为 0 → 池内等权分配
+{
+  const r = allocateBudget(9, [e('A', 0, 0), e('B', 0, 0), e('C', 0, 0)]);
+  check('budget zero weights equal', allocMap(r), { A: 3, B: 3, C: 3 });
+}
+
+// 69. 零权重但已封顶声部退出后，仅对仍在池内的零权重声部等权
+{
+  // 保底各 1；A 上限 2：余 6 三等各 2 → A 触顶退出，余 5 由 B/C 等权 2.5/2.5
+  // 下取整各 +2，余 1 分钟小数相同 → 按声部顺序补给 B
+  const r = allocateBudget(9, [e('A', 0, 1, 2), e('B', 0, 1), e('C', 0, 1)]);
+  check('budget zero weights after cap', allocMap(r), { A: 2, B: 4, C: 3 });
+}
+
+// 70. 零权重声部不参与正权重声部的比例分配
+{
+  // 余量 10：A 权重 10 全拿，B/C 零权重仅保底；尾差也不会落到零权重声部
+  const r = allocateBudget(12, [e('A', 10, 2), e('B', 0, 1), e('C', 0, 1)]);
+  check('budget positive weight dominates', allocMap(r), { A: 10, B: 1, C: 1 });
+}
+
+// 71. 封顶只受上限约束：比例理想值超上限即取上限，余量全部留给不封顶声部
+{
+  const r = allocateBudget(20, [e('A', 999, 0, 5), e('B', 1, 0)]);
+  check('budget cap independent', allocMap(r), { A: 5, B: 15 });
+  check('budget cap independent capped', cappedKeys(r), ['A']);
+}
+
+// 72. 预算等于最少 / 最多总和的边界
+{
+  const rMin = allocateBudget(6, [e('A', 10, 2, 8), e('B', 10, 4, 8)]);
+  check('budget at sum min', allocMap(rMin), { A: 2, B: 4 });
+  const rMax = allocateBudget(16, [e('A', 10, 2, 8), e('B', 10, 4, 8)]);
+  check('budget at sum max', allocMap(rMax), { A: 8, B: 8 });
+  check('budget sum max capped', cappedKeys(rMax), ['A', 'B']);
+}
+
+// 73. 任意合法输入都恰好用完预算（保底合计为 3，预算从 3 起）
+{
+  let ok = true;
+  for (let t = 3; t <= 40; t++) {
+    const r = allocateBudget(t, [e('A', t, 1, 9), e('B', (t * 7) % 5, 2, 12), e('C', (t * 3) % 7, 0)]);
+    if (!r.ok || r.allocations.reduce((a, x) => a + x.minutes, 0) !== t) ok = false;
+    if (r.ok && r.allocations.some((a) => a.minutes < a.min || a.minutes > a.max)) ok = false;
+  }
+  check('budget exhaust invariant', ok, true);
+}
+
+// 74. 非法输入：总量 / 界限不是非负整数、min > max、预算越界，均失败并给出原因
+check('budget non-integer total', allocateBudget(1.5, [e('A', 1, 0)]).ok, false);
+check('budget negative total', allocateBudget(-1, [e('A', 1, 0)]).ok, false);
+{
+  const r = allocateBudget(NaN, [e('A', 1, 0)]);
+  check('budget NaN total reason', r.ok ? null : r.reason, 'invalid-total');
+}
+{
+  const r = allocateBudget(10, [e('A', 1, 2.5, 5)]);
+  check('budget non-integer min reason', r.ok ? null : r.reason, 'invalid-bound');
+}
+{
+  const r = allocateBudget(10, [{ key: 'A', weight: 1, min: 0, max: -3 }]);
+  check('budget negative max reason', r.ok ? null : r.reason, 'invalid-bound');
+}
+{
+  const r = allocateBudget(10, [e('A', 1, 5, 3)]);
+  check('budget min gt max reason', r.ok ? null : r.reason, 'min-gt-max');
+  check('budget min gt max no alloc', r.ok ? r.allocations : null, null);
+}
+{
+  const r = allocateBudget(5, [e('A', 1, 2, 8), e('B', 1, 4, 8)]);
+  check('budget below sum min', r.ok ? null : r.reason, 'out-of-range');
+}
+{
+  const r = allocateBudget(17, [e('A', 1, 2, 8), e('B', 1, 4, 8)]);
+  check('budget above sum max', r.ok ? null : r.reason, 'out-of-range');
+}
+check('budget empty entries', allocateBudget(10, []).ok, false);
+
+// 74b. min === max 的声部容量为 0，预循环即封顶，不参与比例 / 尾差
+{
+  const r = allocateBudget(14, [e('A', 10, 3, 3), e('B', 10, 0), e('C', 10, 0)]);
+  check('budget min-eq-max pre-cap', allocMap(r), { A: 3, B: 6, C: 5 });
+  check('budget min-eq-max capped key', cappedKeys(r), ['A']);
+}
+
+// 74c. 含不封顶声部时只校验下限（无最多总和上限）
+{
+  const r = allocateBudget(1_000_000, [e('A', 0, 2, 8), e('B', 1, 2)]);
+  check('budget infinity cap ok', r.ok, true);
+  // A 权重为 0 不参与正权重余量分配（仅保底 2）；B 拿走全部余量
+  if (r.ok) check('budget infinity cap result', allocMap(r), { A: 2, B: 999_998 });
+}
+
+// 75. 方案不修改入参
+{
+  const entries = [e('A', 10, 2, 8), e('B', 10, 2, 8), e('C', 10, 2)];
+  const snap = JSON.stringify(entries);
+  allocateBudget(24, entries);
+  check('budget pure inputs', JSON.stringify(entries), snap);
+}
+
+// 76. 端到端：以当前工程各声部未达标总秒数为权重（示例工程 4/5/2/0，预算 22 保底各 2）
+{
+  const p = createSampleProject();
+  const ids = p.parts.map((x) => x.id);
+  const r = planRehearsalBudget(
+    p,
+    22,
+    ids.map((id) => ({ partId: id, min: 2, max: Infinity })),
+  );
+  check('project budget ok', r.ok, true);
+  if (r.ok) {
+    check('project budget weights', r.allocations.map((a) => a.weight), [4, 5, 2, 0]);
+    // 保底 8，余 14 按 4:5:2 分 → 4.31/5.38/2.15/0，尾差 2 分钟补小数最大的女高、女低
+    check('project budget minutes', r.allocations.map((a) => a.minutes), [7, 8, 5, 2]);
+    check('project budget exhaust', r.allocations.reduce((a, x) => a + x.minutes, 0), 22);
+    check('project budget part names', r.allocations.map((a) => a.name), p.parts.map((x) => x.name));
+  }
+}
+
+// 77. 工程改动后按当前覆盖重算：调整陈静换气后女低音缺口秒数变化，分配随之改变
+{
+  const p = createSampleProject();
+  const ids = p.parts.map((x) => x.id);
+  const bounds = ids.map((id) => ({ partId: id, min: 2, max: Infinity }));
+  const before = planRehearsalBudget(p, 22, bounds);
+  const chen = p.singers.find((s) => s.name === '陈静')!;
+  const edited: Project = {
+    ...p,
+    singers: p.singers.map((s) =>
+      s.id !== chen.id
+        ? s
+        : { ...s, breaths: s.breaths.map((b) => (b.start === 30 ? { ...b, start: 10, end: 13 } : b)) },
+    ),
+  };
+  const after = planRehearsalBudget(edited, 22, bounds);
+  check('project budget recomputed differs', after.ok && before.ok ? allocMap(after) !== allocMap(before) : false, true);
+  if (after.ok) check('project budget new weight alto', after.allocations[1].weight, 3);
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
